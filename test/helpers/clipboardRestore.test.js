@@ -63,7 +63,7 @@ const clipboardModulePath = require.resolve("../../src/helpers/clipboard");
 
 const originalLoad = Module._load;
 
-function loadClipboardManager({ spawn } = {}) {
+function loadClipboardManager({ spawn, spawnSync } = {}) {
   delete require.cache[clipboardModulePath];
 
   Module._load = function loadWithMocks(request, parent, isMain) {
@@ -75,8 +75,12 @@ function loadClipboardManager({ spawn } = {}) {
         },
       };
     }
-    if (request === "child_process" && spawn) {
-      return { ...childProcess, spawn };
+    if (request === "child_process" && (spawn || spawnSync)) {
+      return {
+        ...childProcess,
+        ...(spawn ? { spawn } : {}),
+        ...(spawnSync ? { spawnSync } : {}),
+      };
     }
     return originalLoad.call(this, request, parent, isMain);
   };
@@ -792,6 +796,70 @@ test("pasteMacOSWithOsascript fallback uses the short macOS restore delay", asyn
     expectedText: "dictated text",
   });
 });
+
+// Only process/clipboard boundaries are mocked: execute the real Linux routing
+// and restoration code without sending keys or touching the user's selections.
+for (const route of ["native", "missing", "failed"]) {
+  for (const [windowClass, modeFlag, pasteKey] of [
+    ["Emacs", "--shift-insert", "shift+Insert"],
+    ["EMACS", "--shift-insert", "shift+Insert"],
+    ["firefox_firefox", null, "ctrl+v"],
+    ["Gnome-terminal", "--terminal", "ctrl+shift+v"],
+    ["not-emacs", null, "ctrl+v"],
+    ["", null, "ctrl+v"],
+  ]) {
+    test(`X11 ${windowClass || "unknown"} paste keys and selection restoration (${route})`, async () => {
+      resetClipboard({ text: "dictated text" });
+      const calls = [];
+      const TestClipboardManager = loadClipboardManager({
+        spawn: createSpawn(calls, route === "failed" ? [1, 0] : [0]),
+        spawnSync(command, args) {
+          assert.equal(command, "xdotool");
+          const output = { getactivewindow: "123", getwindowclassname: windowClass }[args[0]];
+          return { status: output ? 0 : 1, stdout: Buffer.from(output || "") };
+        },
+      });
+      const manager = new TestClipboardManager();
+      manager.commandExists = (command) => command === "xdotool";
+      manager.resolveLinuxFastPasteBinary = () =>
+        route === "missing" ? null : "/test/linux-fast-paste";
+      let primary;
+      manager._writePrimarySelection = (text) => {
+        primary = text;
+      };
+      await withWaylandEnvironment("GNOME", async () => {
+        process.env.XDG_SESSION_TYPE = "x11";
+        delete process.env.WAYLAND_DISPLAY;
+        const result = await manager.pasteLinux(
+          { type: "text", data: "previous clipboard" },
+          {
+            expectedClipboardText: "dictated text",
+            originalPrimary: "previous primary",
+          }
+        );
+        await result.restoreComplete;
+      });
+      const nativeCall = {
+        command: "/test/linux-fast-paste",
+        args: ["--window", "123", ...(modeFlag ? [modeFlag] : [])],
+      };
+      const fallbackCall = {
+        command: "xdotool",
+        args: ["windowactivate", "--sync", "123", "key", pasteKey],
+      };
+      assert.deepEqual(
+        calls,
+        route === "native"
+          ? [nativeCall]
+          : route === "failed"
+            ? [nativeCall, fallbackCall]
+            : [fallbackCall]
+      );
+      assert.equal(fakeClipboard.text, "previous clipboard");
+      assert.equal(primary, "previous primary");
+    });
+  }
+}
 
 // Terminal detection now serves two callers: the Linux paste path, which matches
 // window classes, and macOS selection capture, which matches localized app names.

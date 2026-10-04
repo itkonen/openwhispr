@@ -1549,6 +1549,9 @@ class ClipboardManager {
     const windowSignals = [detectedWindowClass, detectedWindowComm].filter(Boolean);
     const signalsMatch = (needle) => windowSignals.some((signal) => signal.includes(needle));
     const detectedIsKonsole = signalsMatch("konsole");
+    // Ordinary Emacs binds Ctrl+V to scrolling, not paste. Match the actual
+    // WM_CLASS exactly (not a title or a process-name substring).
+    const detectedIsEmacs = detectedWindowClass === "emacs";
 
     // Shift+Insert is the universal Linux paste shortcut — works in terminals and
     // GUI apps, and (unlike Ctrl+V) is not intercepted by TUI agents like Codex,
@@ -1557,7 +1560,10 @@ class ClipboardManager {
     // Electron apps (VS Code, Cursor) host TUI terminals too, so route them to
     // Shift+Insert on any desktop environment, even when their class is detected.
     const useShiftInsert =
-      detectedIsKonsole || detectedIsElectron || (isWayland && windowSignals.length === 0);
+      detectedIsEmacs ||
+      detectedIsKonsole ||
+      detectedIsElectron ||
+      (isWayland && windowSignals.length === 0);
     const isTerminalTarget =
       windowSignals.length > 0 && LINUX_TERMINAL_CLASSES.some((term) => signalsMatch(term));
     const hyprlandShortcut = useShiftInsert
